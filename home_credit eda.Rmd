@@ -1,0 +1,174 @@
+---
+title: "Home Credit EDA"
+author: "Wenjia Xie (Grace)"
+date: "December 6, 2018"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,out.width="0.9\\linewidth",dev="pdf",fig.align  = 'center')
+library(tidyverse)
+library(scales)
+library(magrittr)
+library(arm)
+library(lattice)
+library(ggcorrplot)
+library(knitr)
+library(pROC)
+library(lme4)
+library(car)
+```
+
+
+
+# Data Cleaning
+```{r, include = FALSE}
+hcdata<-read_csv("all/application_train.csv")
+
+```
+
+# EDA
+```{r}
+############################ Features about the loan ###########################
+# the distribution of the target
+
+hcdata$TARGET %<>% as.factor()
+target <- hcdata %>% 
+  group_by(TARGET) %>% 
+  summarise(count = n()) %>% 
+  mutate(per=paste(round(prop.table(count[1:2])*100,2),"%"))
+
+ggplot(target,aes(x=as.factor(TARGET),y=count))+
+  geom_bar(stat="identity",width=0.3,fill="steelblue")+
+  scale_y_continuous(labels = comma)+
+  labs(title="Number of Targets",x=" Target",y="Count")+
+  geom_text(aes(label=per), color="white",size=3.7,vjust=1.5,hjust=0.3)
+  
+
+# the distribution of AMT_CREDIT
+credit<-hcdata %>% 
+  dplyr::select(AMT_CREDIT,TARGET) %>% 
+   na.omit() 
+
+scale2<-function(a){
+  (abs(a)-mean(abs(a)))/(2*sd(abs(a)))
+}
+
+credit$AMT_CREDIT<-scale2(credit$AMT_CREDIT)
+
+ggplot(credit,aes(x=AMT_CREDIT,color=as.factor(TARGET)))+
+  geom_density(size=1.2,adjust=1.5)+
+  geom_histogram(aes(y=..density..,fill=as.factor(TARGET)), alpha=0.1, 
+                position="identity")+
+  theme_minimal()
+```
+
+
+
+```{r}
+##########  Personal Information in terms of loan is repaid or not ############
+
+# Gender difference 
+gender<-hcdata %>% 
+  na.omit(select(CODE_GENDER,TARGET))%>% 
+  group_by(CODE_GENDER,TARGET) %>% 
+  summarise(count=n()) 
+gender<-gender[-5,] %>% 
+  dplyr::mutate(per=paste(round(prop.table(count[1:2])*100,2),"%"))
+
+ggplot(gender,aes(x=as.factor(CODE_GENDER),y=count,fill=as.factor(TARGET)))+
+  geom_bar(stat="identity",width=.5)+
+  geom_text(aes(label=per),color="white",vjust=1.2,hjust=0.4,size=3.7)+
+  guides(fill=guide_legend(title=NULL))+
+  scale_fill_discrete(labels=c("Repaid", "Unrepaid"))+
+  labs(title="Gender difference in terms of loan is repaid or not",x="Gender", y = "Count" )
+
+
+# Age difference 
+age<-hcdata %>% 
+  na.omit(select(DAYS_BIRTH,TAGET)) %>% 
+  mutate(year=round(abs(DAYS_BIRTH)/365),0) 
+ 
+ggplot(age,aes(x=year,color=as.factor(TARGET)))+
+  geom_density(size=1.2)+
+  geom_histogram(aes(y=..density..,fill=as.factor(TARGET)), alpha=0.1, 
+                position="identity")+
+  theme_minimal()+
+  labs(title="Age difference in terms of loan is repaid or not",x="Age", y = "Count" )
+
+# Family Status difference
+marriage<-hcdata %>% 
+  na.omit(select(NAME_FAMILY_STATUS,TARGET)) %>% 
+  group_by(NAME_FAMILY_STATUS,TARGET) %>% 
+  summarise(count=n()) %>% 
+  mutate(per=paste(round(prop.table(count[1:2]),2)))
+
+ggplot(marriage,aes(x=as.factor(NAME_FAMILY_STATUS),y=as.numeric(per),fill=as.factor(TARGET)))+
+  geom_bar(stat="identity",width=.5)+
+  geom_text(aes(label=per), color="white",vjust=0.9,hjust=0.4,size=3.7)+
+  guides(fill=guide_legend(title=NULL))+
+  scale_fill_discrete(labels=c("Repaid", "Unrepaid"))+
+  labs(title="Difference among Family Status in terms of loan is repaid or  not",x="Family Status", y = "Percentage" )
+
+
+```
+
+
+```{r}
+#############  The effect of employment on repaying the debts ##################
+  
+# The effect of Days_Employed
+#Days_Employed: How many days before the application the person started current employment
+
+employed<-hcdata %>% 
+  dplyr::select(DAYS_EMPLOYED,TARGET) %>% 
+  na.omit() %>% 
+  mutate(year=round(abs(DAYS_EMPLOYED)/365)) 
+
+employed<-employed[-which(employed$year==1001),]
+  
+ggplot(employed,aes(x=year,color=as.factor(TARGET)))+
+  geom_density(size=1.2,adjust=1.5)+
+  geom_histogram(aes(y=..density..,fill=as.factor(TARGET)), alpha=0.1, 
+                position="identity")+
+  guides(fill=guide_legend(title=NULL))+
+  scale_fill_discrete(labels=c("Repaid", "Unrepaid"))+
+  theme_minimal()+
+  labs(title="Difference among years of work in terms of loan is repaid or  not",x="Years of work", y = "Percentage" )
+
+
+# The effect of OCCUPATION_TYPE
+occupation<-hcdata %>% 
+  dplyr::select(OCCUPATION_TYPE,TARGET) %>% 
+  na.omit() %>% 
+  group_by(OCCUPATION_TYPE,TARGET) %>% 
+  summarise(count=n()) %>% 
+  mutate(per=paste(round(prop.table(count[1:2]),2))) 
+occupation<-occupation[-c(1,2),] %>% 
+  filter(TARGET==1) %>% 
+  arrange(desc(per))
+  
+
+ggplot(occupation,aes(x=reorder(as.factor(OCCUPATION_TYPE),-(as.numeric(per))),y=as.numeric(per),fill=as.factor(TARGET)))+
+  geom_bar(stat="identity",width=.5)+
+  labs(title="Failure to repay by occupation",x="OCcupation", y = "Percentage" )+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+gplot(corr.m, aes(x = reorder(miRNA, -value), y = value, fill = variable)) + 
+  geom_bar(stat = "identity")
+```
+
+
+```{r}
+#############  The effect of living standard on repaying the debts #############
+# REGION_POPULATION_RELAT
+region<-hcdata %>% 
+  dplyr::select(REGION_POPULATION_RELATIVE,TARGET) 
+
+ggplot(region,aes(x=REGION_POPULATION_RELATIVE,color=as.factor(TARGET)))+
+  geom_density(size=1.2)+
+  geom_histogram(aes(y=..density..,fill=as.factor(TARGET)), alpha=0.1, 
+                position="identity")+
+  theme_minimal()
+
+```

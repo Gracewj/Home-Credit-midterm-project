@@ -1,0 +1,296 @@
+---
+title: 'Midterm Project: Home Credit Report'
+author: "Wenjia Xie"
+date: "December 8, 2018"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,out.width="0.9\\linewidth",dev="png",fig.align  = 'center')
+pacman::p_load(
+tidyverse,
+scales,
+magrittr,
+arm,
+lattice,
+ggcorrplot,
+knitr,
+pROC,
+lme4,
+car,
+MASS,
+DHARMa,
+logistf
+)
+
+```
+
+```{r, include = FALSE}
+hcdata<-read_csv("all/application_train.csv")
+```
+
+```{r,include=FALSE}
+# group by years of employment 
+scale2<-function(a){
+    (abs(a)-mean(abs(a)))/(2*sd(abs(a)))
+}
+
+
+mulemp1<-hcdata %>% 
+  dplyr::select(EXT_SOURCE_2,EXT_SOURCE_3,DAYS_ID_PUBLISH,DAYS_REGISTRATION,
+         DAYS_EMPLOYED,AMT_ANNUITY,DAYS_LAST_PHONE_CHANGE,AMT_CREDIT,
+         AMT_INCOME_TOTAL,EXT_SOURCE_1,REGION_POPULATION_RELATIVE,
+         AMT_GOODS_PRICE,HOUR_APPR_PROCESS_START,CODE_GENDER,
+         NAME_FAMILY_STATUS,DAYS_BIRTH,OCCUPATION_TYPE,TARGET) %>% 
+  na.omit() %>% 
+  mutate(yearemp=abs(DAYS_EMPLOYED)/365) %>%          # employed year 
+  mutate(employear_range=ifelse(yearemp<1,"<1",
+           (ifelse(1<= yearemp & yearemp<4,"1~3",
+            ifelse(4<=yearemp & yearemp<6,"4~5",
+            ifelse(6<=yearemp & yearemp<11,"6~10",
+            ifelse(11<=yearemp & yearemp<16,"11~15",
+            ifelse(16<=yearemp & yearemp<21,"16~20",
+            ifelse(21<=yearemp & yearemp<26,"21~25",
+            ifelse(26<=yearemp & yearemp<31,"26~30",
+            ifelse(31<=yearemp & yearemp<41,"31~40",
+            ifelse(41<=yearemp & yearemp<51,"41~50","NA"
+                   )))))))))))) %>%                #  employed year range
+  mutate(yearage=abs(DAYS_BIRTH)/365) %>%          #  age 
+  mutate(agerange=ifelse(yearage<26,"<25",       
+           (ifelse(26<= yearage & yearage<31,"26~30",
+            ifelse(31<=yearage & yearage<36,"31~35",
+            ifelse(36<=yearage & yearage<41,"36~40",
+            ifelse(41<=yearage & yearage<46,"41~45",
+            ifelse(46<=yearage & yearage<51,"46~50",
+            ifelse(51<=yearage & yearage<56,"51~55",
+            ifelse(56<=yearage & yearage<61,"56~60",
+            ifelse(61<=yearage & yearage<66,"61~65",
+            ifelse(66<=yearage & yearage<=70,"66~70","NA"
+                   )))))))))))) %>%                #   age range
+  mutate(idyear=round(abs(DAYS_ID_PUBLISH)/365,2)) %>%     
+  mutate(regyear=round(abs(DAYS_REGISTRATION)/365,2)) %>% 
+  mutate(phoneyear=round(abs(DAYS_LAST_PHONE_CHANGE)/365,2))
+
+colnames(mulemp1)<-c("s2","s3","id","reg","emp","annulty","phone","credit","income","s1","pop","price","hour","gender","marriage","ageday","occupation","y","empyear","emprange","ageyear","agerange","idyear","regyear","phoneyear")
+
+
+mulemp1$s2<-exp(mulemp1$s2)
+mulemp1$s3<-exp(mulemp1$s3)
+mulemp1$empyear<-log(abs(mulemp1$empyear))
+mulemp1$income<-log(mulemp1$income)
+mulemp1$credit<-log(mulemp1$credit)
+mulemp1$price<-log(mulemp1$price)
+
+
+mulemp1<-mulemp1[,-c(3,4,5,7,16)]
+mulemp1[,c(3:5)]<-apply(mulemp1[,c(3:5)],FUN = scale2,2)
+mulemp1<-mulemp1[-which(mulemp1$gender == "XNA"),]
+
+
+# divide the training dataset and test dataset
+set.seed(2018)
+sub<-sample(1:nrow(mulemp1),round(nrow(mulemp1)*1/5))
+train<-mulemp1[-sub,]
+test<-mulemp1[sub,]
+```
+
+# 1. Abstract
+
+The purpose of this project is to use data that Home Credit provided on Kaggle to find out what kinds of variables are of great importance in indentifying clients who may have difficulities in repaying loan and make classificaion. In this project, the AIC of different models and the F1 score of classification are used to select models. As a result,the multilevel logistic regression is used to make prediction. We find out that: 1) Three different external data sources in the datasets are of vital importance in classification. 2) In terms of clients personal information, the yonger the clients are and shorter they change their job before application for loan, the higher risk of failure to repay their loan. 3) Clients who are willing to update their identity document often have a lower risk of default.
+
+# 2. Introduction 
+
+Home Credit is an international non-bank financial institution that serve the unbanked population by providing them a positive borrowing experience.To make sure their client can have a safe loan experience, Home Credit wants to make use of a variety of data to predict their clients' repayment abilities.
+
+The goal of this project is to use the data that Home Credit provided on Kaggle to understand what kinds of characteristics may have strong influence on predicting clients’ repayment abilities.To go further,based on these characteristics, we also want to build some models that can help Home Credit to identify clients may have payment difficulties.In this case, Home Credit may avoid some potential risk of bad loan.
+
+
+
+# 3. Method
+
+## 3.1 Data source
+
+Home Credit has provided their datasets of various information on Kaggle. The total data sets include 10 files and in each file it contains some information about the client’s previous credits, monthly balance, behavioral data etc. Basically, we will use the data from application {train|test}.csv to build the prediction model. It contains 307512 entries with 122 symbolic attributes. In this dataset, each entry represents a person who takes a credit by Home Credit. 
+
+## 3.2 Exploratory Data Analysis
+
+###3.2.1 The distribution of target
+The target in the training application data indicating 0: the loan was repaid or 1: the loan was not repaid. The distribution of targets are as follows. From the plot we can see that the vast majority of the loan was repaid, which is often the case in a promising financial institution. Thus we should focus our efforts on identifying the potential unrepaid loan.
+
+![The distribution of the targets](The distribution of the targets.jpg "The distribution of the targets")
+
+### 3.2.2 Personal Information in terms of loan is repaid or not
+
+Home Credit provides a variety of data on the basic information about their clients, including their gender, age, family status, education etc.
+We uses these variables to group the clients and calculate the percentage of bad loans in each group. From the exploratory data analysis, we find an interesting phenomenon that compared with elder people, yonger people tend to have a higher rate of failure to repay their loan: 
+
+![age difference](age difference.jpg "Age difference in terms of loan is repaid or not")
+
+![age group](age group.png "Failure to repay by age grou")
+
+We can see that the youngest age group have more than 8% higher rate of failure to repay their loan than the oldest age group on average.
+So for the bank, maybe they can provide young people with more guidance or financial planning tips to help younger clients pay on time.
+
+Besides the clients' age, we also look at the influence of family status and gender on repaying their loan.And we find that although male tend to have higher default rate than female(1.6%),the difference is not so signficance. Also in terms of family status, the difference is too small to be noticed. (see Appendix.)
+
+### 3.2.3 Employment information in terms of loan is repaid or not
+
+In the datasets, another groups of variables may have influence on predicting the bad loan are the employment groups, including information about clients' days of the work,occupation type and income etc.  
+
+![years of the work](years of the work.png "Failure to repay by years of the work")
+
+![Occupation](occupation.jpg "Failure to repay by occupation")
+
+From the plot, we can discover that for people who have worked for a long time, they have lower probability of unrepaying their loan than workplace newbies. This is information that could be directly used by the bank: The bank should take precautionary measures to people who change their work often or new to their position.
+
+Another interesting discovery is that people of some certain occupations,like manual workers, may have significant higher default rate than others. This trend is also consistent with the trend of income: people who earn more are also more willing to repay their loan.This does not mean the bank should discriminate against manual workers, but they can pay attention to some other characteristics of these clients to make further decision.
+
+## 3.3 Model Used
+
+Before doing the modeling, I created a dataset containing the information of client's basic personal information and their previous credit score from external data source. Also,the data are preprocessed by clearing the missing values and scaling the range of the features. In the dataset, 20% of the data are randomly selected as test data, in which there are 16491 entries in total.  
+
+```{r,echo=FALSE}
+names<-colnames(mulemp1)
+Names<-names[c(1:12,14,16,18,19,20)]
+Description<-c("Normalized score from external data source","Normalized score from external data source","Annuity of the Credit Bureau credit","Final credit amount on the previous application","Income of the client","Normalized score from external data source","Normalized population of region where client lives","Goods price of good that client asked for  on the previous application","Approximately at what day hour did the client apply for the previous application","Gender of the client","Family Status of the Client","Occupatopn of the client","How many years before the application the person started current employment","Client's age in days at the time of application","How many years before the application did client change the identity document","How many years before the application did client change his registration","How many days before application did client change phone")
+kable(cbind(Names,Description))
+```
+
+
+
+### 3.3.1 Logistic Model
+
+To get a baseline model, I use the logistic model with all the features in the datasets I just created. The funtion "glm" with the "family = binomial" are used to train the model and then predictions are made on the testing data.
+
+
+### 3.3.2 Multilevel Logistic Regression
+
+From the EDA, we can find that clients from the same age group, years of work groups and occupation groups may have closer default rate;while among each groups, there exists a significance difference. To analyze the difference among the groups, we use four different multilevel logistic regressions:group by age, group by years of work and group by occupation and group by all these variables. The function "glmer" with the "family=binomial" are used to train each model and predictions are made on the same testing data.
+
+# 4.Results of the model
+
+## 4.1 Model Choice
+
+To choose from above five models, I use function "anova" to see the difference. Also, they were all tested on test datasets to see the accuracy of the prediction. Under the rules of minimum of AIC and maximum of F1-score, the multilevel logistic regression model with age,occupation and years of work groups have the best performance among the five models.
+
+The fitted model can be viewed as follows:
+
+glmer(data = train,y~s2+s3+annulty+s1+pop+income+idyear+hour+
+                 (1|emprange)+(1|agerange)+(1|occupation),family =binomial(link="logit"))
+                 
+```{r,echo=FALSE}
+# group by years of employment 
+mulfit1<-glmer(data = train,y~s2+s3+annulty+s1+pop+credit+agerange+
+                 (1|emprange),family = binomial(link="logit")) 
+
+
+# group by years of age
+mulfit2<-glmer(y~ s2+s3+annulty+s1+income+pop+occupation+ (1|agerange),data=train,family=binomial(link="logit"))
+
+
+# group by occupation
+mulfit3<-glmer(y~ s2 + s3 + annulty+pop+income+agerange+(1|occupation),
+               data=train,family=binomial(link="logit")) 
+
+
+
+# group by years of employment ,years of age,occupation
+mulfit<-glmer(data = train,y~s2+s3+annulty+s1+pop+income+idyear+hour+
+                 (1|emprange)+(1|agerange)+(1|occupation),family = binomial(link="logit")) 
+
+
+kable(anova(mulfit,mulfit1,mulfit2,mulfit3))
+
+
+```
+
+## 4.2 Interpretation
+
+```{r,echo=FALSE}
+
+summary(mulfit) 
+```
+
+From the summary of the model, we can see that:
+
+• The coefficient for s2 is -1.25.Dividing by four yields a rough estimate that for one standard deviation increase in the normalized score from external data source s2, the probability of failure of repaying the loan decrease about 31%. The inerpretation is nearly the same for s3 and s1.
+
+• The coefficient for annulty is 0.25.Dividing by four yields a rough estimate that for one standard deviation increase in the scaled annulty,the probability of failure of repaying the loan increase about 6.25%.
+
+• The coefficient for population is -2.23,which, when divided by 4, is 0.55,suggesting that one standard deviation increased in the normalized population of region where client lives, the probability of of failure of repaying the loan decrease about 55%.
+
+• The age groups errors have estimated standard deviation 0.28 on the logit scale.Dividing by 4 tells us that the age differed by approximately ±7% on the probability scale.
+
+• The years of works groups errors have estimated standard deviation 0.18 on the logit scale.Dividing by 4 tells us that the age differed by approximately ±4.5% on the probability scale.
+
+• The occupation groups errors have estimated standard deviation 0.14 on the logit scale.Dividing by 4 tells us that the age differed by approximately ±3.5% on the probability scale.
+
+## 4.3 Model Checking and prediction
+
+### The binned plot of the residuals
+First of all, we will look at the binned plot of the multilevel logistic regression. 
+
+```{r,echo=FALSE}
+binnedplot(fitted(mulfit),resid(mulfit,type="response"))
+```
+
+From the plot, we can see that the majority of the points fall within the range and there is no distinctive pattern in the plot. 
+ 
+### Testing significance of effects 
+
+To test if the coefficients are zero, we use the likelihood ratio test(LRT) in R. Although the LRT of mixed models is only approximately χ2 distributed, we can use it to roughly estimate the significance of coefficients.
+
+```{r}
+drop1(mulfit,test="Chisq")
+```
+
+From the result, we can see that most coefficients in the models are significantly not equal to zero, except for the coefficient of population. Generally using MCMC methods can help us get a more reliable p-value, but due to the longer run time, we just make a simple estimation.
+
+### Prediction 
+```{r,echo=FALSE}
+#prediction on test data set
+mul4.probs<-predict(newdata=test,mulfit,type="response")
+mul4.pred<-ifelse(mul4.probs>0.2,"Unrepaid","Repaid")
+table(mul4.pred,test$y)
+
+mTP4<-312
+mTN4<-14441
+mFP4<-809
+mFN4<-929
+
+cat("The sensitivity is ",round(mTP4/(mTP4+mFN4),4),". \n")
+cat("The specificity is ",round(mTN4/(mTN4+mFP4),4),". \n")
+cat("The F1 score is ",round(2*mTP4/(2*mTP4+mFP4+mFN4),4),".")
+```
+
+# 5. Discussion
+
+## 5.1 Implication
+
+For a financial institution that provide loan for customers, it is important to understand what characterisitcs play a role in influencing clients' repayment abilities. 
+
+From our work, we can see that the scores from external data source for the clients are good reflections of their ability to repay their loans. The lower the scores are, the more cautious the bank should be of lending their money. Besides the external scores,some basic personal characteristics and employment information are also important. Generally speaking, for those who are under 35 years old and often change their job or be new to their position, the bank should be aware that they may have lower savings and wages, thus they may have a higher probability of default rate. SOme other factors can also be used to identify the potential risk of lending their money, such as how many years before the application did client change the identity document.It seems that people who are willing to update their identity documment frequently have a lower rate of default.
+
+For the bank, when knowing what kinds of factors will have influence on repaying debt, it can lower the risk before lending its money. They can also take precautionary measures and  provide guidance or financial planning tips to clients pay on time.
+
+
+## 5.2 Limitation
+
+Due to the limited time and knowledge, there are many limitations in this project. 
+
+1. The data cleaning process
+
+Although in some variables like DAYS_EMPLOYED, I detect the abnormal values and find out there are some relationships between abnormal values and the target, in many other variables I just delete the abnormal values and the missing values. This process causes the amount of datasets decrease significantly and much valuable information are also excluded, which can also affect the training of the models.
+
+2. The module checking process
+
+I try to use simulations in checking the results of the models, but due to the slow efficiency I failed to run the model on my computer. If simulations can be used,they can be a good way to justify my result.
+
+
+## 5.3 Future direction
+
+In this project, I basically just use the data in the train data sets. There are many information of client’s previous credits and monthly balance I haven't use.For further analysis, I can join each files using SQL and build a new data set. With these information, some more complicated models can be built and the accuracy of prediction may also be improved.
+
+# 6. Acknowledgement
+
+I would like to express my special thanks of gratitude to my professor, [Mr Yajima], who not only be always patient about our questions, but also give us instruction 

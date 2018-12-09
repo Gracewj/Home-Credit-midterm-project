@@ -1,0 +1,237 @@
+---
+title: "Midterm Project: Home Credit Report"
+author: "Wenjia Xie (Grace)"
+date: "November 26, 2018"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,out.width="0.9\\linewidth",dev="pdf",fig.align  = 'center')
+library(tidyverse)
+library(scales)
+library(magrittr)
+library(arm)
+library(lattice)
+library(ggcorrplot)
+library(knitr)
+library(pROC)
+library(lme4)
+library(car)
+library(MASS)
+library(DHARMa)
+library(logistf)
+```
+
+
+
+# Data Cleaning
+```{r, include = FALSE}
+hcdata<-read_csv("all/application_train.csv")
+```
+
+```{r,echo=FALSE}
+# group by years of employment 
+scale2<-function(a){
+    (abs(a)-mean(abs(a)))/(2*sd(abs(a)))
+}
+
+
+mulemp1<-hcdata %>% 
+  dplyr::select(EXT_SOURCE_2,EXT_SOURCE_3,DAYS_ID_PUBLISH,DAYS_REGISTRATION,
+         DAYS_EMPLOYED,AMT_ANNUITY,DAYS_LAST_PHONE_CHANGE,AMT_CREDIT,
+         AMT_INCOME_TOTAL,EXT_SOURCE_1,REGION_POPULATION_RELATIVE,
+         AMT_GOODS_PRICE,HOUR_APPR_PROCESS_START,CODE_GENDER,
+         NAME_FAMILY_STATUS,DAYS_BIRTH,OCCUPATION_TYPE,TARGET) %>% 
+  na.omit() %>% 
+  mutate(yearemp=abs(DAYS_EMPLOYED)/365) %>%          # employed year 
+  mutate(employear_range=ifelse(yearemp<1,"<1",
+           (ifelse(1<= yearemp & yearemp<4,"1~3",
+            ifelse(4<=yearemp & yearemp<6,"4~5",
+            ifelse(6<=yearemp & yearemp<11,"6~10",
+            ifelse(11<=yearemp & yearemp<16,"11~15",
+            ifelse(16<=yearemp & yearemp<21,"16~20",
+            ifelse(21<=yearemp & yearemp<26,"21~25",
+            ifelse(26<=yearemp & yearemp<31,"26~30",
+            ifelse(31<=yearemp & yearemp<41,"31~40",
+            ifelse(41<=yearemp & yearemp<51,"41~50","NA"
+                   )))))))))))) %>%                #  employed year range
+  mutate(yearage=abs(DAYS_BIRTH)/365) %>%          #  age 
+  mutate(agerange=ifelse(yearage<26,"<25",       
+           (ifelse(26<= yearage & yearage<31,"26~30",
+            ifelse(31<=yearage & yearage<36,"31~35",
+            ifelse(36<=yearage & yearage<41,"36~40",
+            ifelse(41<=yearage & yearage<46,"41~45",
+            ifelse(46<=yearage & yearage<51,"46~50",
+            ifelse(51<=yearage & yearage<56,"51~55",
+            ifelse(56<=yearage & yearage<61,"56~60",
+            ifelse(61<=yearage & yearage<66,"61~65",
+            ifelse(66<=yearage & yearage<=70,"66~70","NA"
+                   )))))))))))) %>%                #   age range
+  mutate(idyear=round(abs(DAYS_ID_PUBLISH)/365,2)) %>%     
+  mutate(regyear=round(abs(DAYS_REGISTRATION)/365,2)) %>% 
+  mutate(phoneyear=round(abs(DAYS_LAST_PHONE_CHANGE)/365,2))
+
+colnames(mulemp1)<-c("s2","s3","id","reg","emp","annulty","phone","credit","income","s1","pop","price","hour","gender","marriage","ageday","occupation","y","empyear","emprange","ageyear","agerange","idyear","regyear","phoneyear")
+
+
+mulemp1$s2<-exp(mulemp1$s2)
+mulemp1$s3<-exp(mulemp1$s3)
+mulemp1$empyear<-log(abs(mulemp1$empyear))
+mulemp1$income<-log(mulemp1$income)
+mulemp1$credit<-log(mulemp1$credit)
+mulemp1$price<-log(mulemp1$price)
+
+
+mulemp1<-mulemp1[,-c(3,4,5,7,16)]
+mulemp1[,c(3:5)]<-apply(mulemp1[,c(3:5)],FUN = scale2,2)
+mulemp1<-mulemp1[-which(mulemp1$gender == "XNA"),]
+
+
+# divide the training dataset and test dataset
+set.seed(2018)
+sub<-sample(1:nrow(mulemp1),round(nrow(mulemp1)*1/5))
+train<-mulemp1[-sub,]
+test<-mulemp1[sub,]
+```
+
+
+```{r}
+##############################  Baseline Model ###############################
+# logistic regression 1
+logfit1<-glm(data = train,y~s2+s3+annulty+credit+income+s1+pop+price+hour+gender+marriage+occupation+empyear+ageyear+idyear+regyear+phoneyear,family = binomial(link="logit")) 
+
+summary(logfit1)    # 31467
+
+
+```
+
+```{r}
+### model checking of logfit1
+binnedplot(fitted(logfit1),resid(logfit1,type="response"))
+coefplot(logfit1)
+kable(display(logfit1)$coef,digits=2)
+AIC(logfit1)
+1 - pchisq(deviance(logfit1), df.residual(logfit1))
+influenceIndexPlot(logfit1, vars=c("Cook", "hat"))
+
+#prediction on test datasets
+fit1.probs<-predict(newdata = test,logfit1,type="response")
+fit1.pred<-ifelse(fit1.probs>0.3,"Unrepaid","Repaid")
+kable(table(fit1.pred,test$y))
+(76174+49)/(76174+49+6199+31) 
+
+TP1<-125
+TN1<-15059
+FP1<-204
+FN1<-1103
+
+cat("The sensitivity is ",round(TP1/(TP1+FN1),4),". \n")
+cat("The specificity is ",round(TN1/(TN1+FP1),4),". \n")
+cat("The F1 score is ",round(2*TP1/(2*TP1+FP1+FN1),4),".")
+
+# The prediction is slightly better than guessing all the targets equal to zero
+
+```
+
+```{r}
+### model checking of logfit2
+binnedplot(fitted(logfit2),resid(logfit2,type="response"))
+coefplot(logfit2)
+kable(display(logfit2)$coef,digits=2)
+AIC(logfit2)
+1 - pchisq(deviance(logfit2), df.residual(logfit2))
+influenceIndexPlot(logfit2, vars=c("Cook", "hat"))
+
+#prediction
+fit2.probs<-predict(newdata = test,logfit2,type="response")
+fit2.pred<-ifelse(fit2.probs>0.3,"Unrepaid","Repaid")
+kable(table(fit2.pred,test$y))
+
+
+TP2<-124
+TN2<-15059
+FP2<-204
+FN2<-1104
+
+cat("The sensitivity is ",round(TP2/(TP2+FN2),4),". \n")
+cat("The specificity is ",round(TN2/(TN2+FP2),4),". \n")
+cat("The F1 score is ",round(2*TP2/(2*TP2+FP2+FN2),4),".")
+
+```
+
+
+
+```{r}
+########################   multilevel regression ###############################
+# group by years of employment 
+mulfit1<-glmer(data = train,y~s2+s3+annulty+s1+pop+credit+agerange+
+                 (1|emprange),family = binomial(link="logit")) 
+summary(mulfit1)      # 31652.2
+
+
+# group by years of age
+mulfit2<-glmer(y~ s2+s3+annulty+s1+income+pop+occupation+ (1|agerange),data=train,family=binomial(link="logit"))
+summary(mulfit2)   #51123.1
+
+# group by occupation
+mulfit3<-glmer(y~ s2 + s3 + annulty+pop+income+agerange+(1|occupation),
+               data=train,family=binomial(link="logit")) 
+summary(mulfit3)    # 32386.3
+binnedplot(fitted(logfit1),resid(logfit1,type="response"))
+
+#
+mulfit4<-glmer(data = train,y~s2+s3+annulty+s1+pop+income+idyear+hour+
+                 (1|emprange)+(1|agerange)+(1|occupation),family = binomial(link="logit")) 
+summary(mulfit4)      # 31608.4
+
+```
+
+```{r}
+################### model checking of multilevel model #########################
+#model check for mulfit1
+# testing single parameters: Likelihood Ratio Test
+drop1(mulfit4,test="Chisq")
+
+confint(mulfit1)
+
+G2 = -2 * logLik(mulfit1) + 2 * logLik(mulfit1)
+pchisq(as.numeric(G2), df=1, lower.tail=F)
+
+#
+plot(mulfit4)
+binnedplot(fitted(mulemploy1),resid(mul_employ1,type="response"))
+
+
+#prediction on test set
+mul1.probs<-predict(newdata= test,mulfit1,type="response")
+mul1.pred<-ifelse(mul1.probs>0.3,"Unrepaid","Repaid")
+kable(table(mul1.pred,test$y))
+
+mTP1<-101
+mTN1<-15099
+mFP1<-164
+mFN1<-1127
+
+cat("The sensitivity is ",round(mTP1/(mTP1+mFN1),4),". \n")
+cat("The specificity is ",round(mTN1/(mTN1+mFP1),4),". \n")
+cat("The F1 score is ",round(2*mTP1/(2*mTP1+mFP1+mFN1),4),".")
+```
+
+
+```{r}
+#model check for mulfit3
+#prediction on test data set
+mul4.probs<-predict(newdata=test,mulfit4,type="response")
+mul4.pred<-ifelse(mul4.probs>0.3,"Unrepaid","Repaid")
+kable(table(mul4.pred,test$y))
+
+mTP3<-67
+mTN3<-15153
+mFP3<-110
+mFN3<-1161
+
+cat("The sensitivity is ",round(mTP3/(mTP3+mFN3),4),". \n")
+cat("The specificity is ",round(mTN3/(mTN3+mFP3),4),". \n")
+cat("The F1 score is ",round(2*mTP3/(2*mTP3+mFP3+mFN3),4),".")
+```
+
